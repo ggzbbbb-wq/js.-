@@ -1,5 +1,290 @@
-# Object file
-*.o
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
+import { promisify } from 'util'
+import { execFile } from 'child_process'
 
-# Ada Library Information
-*.ali
+const execFileAsync = promisify(execFile)
+
+const YTDLP_PATH = process.env.YTDLP_PATH || '/home/container/yt-dlp'
+
+// ===============================
+// 📥 تحميل الفيديو
+// ===============================
+
+async function getFacebookVideo(url) {
+
+    if (!url || !/(facebook\.com|fb\.watch)/i.test(url)) {
+        throw new Error('رابط Facebook غير صحيح.')
+    }
+
+    const tempDir = await fs.promises.mkdtemp(
+        path.join(os.tmpdir(), 'rocky-fb-')
+    )
+
+    const output = path.join(tempDir, 'video.%(ext)s')
+
+    const args = [
+        '--no-warnings',
+        '--no-playlist',
+        '--no-progress',
+        '--no-simulate',
+        '--force-overwrites',
+        '--restrict-filenames',
+        '--format',
+        'best[ext=mp4]/best',
+        '--merge-output-format',
+        'mp4',
+        '--output',
+        output,
+        '--print',
+        '%(title)s',
+        url
+    ]
+
+    try {
+
+        let result
+
+        try {
+            result = await execFileAsync(
+                YTDLP_PATH,
+                args,
+                {
+                    timeout: 600000,
+                    maxBuffer: 20 * 1024 * 1024
+                }
+            )
+        } catch (error) {
+
+            if (error.code !== 'ENOENT') throw error
+
+            result = await execFileAsync(
+                'yt-dlp',
+                args,
+                {
+                    timeout: 600000,
+                    maxBuffer: 20 * 1024 * 1024
+                }
+            )
+        }
+
+        const files = await fs.promises.readdir(tempDir)
+
+        const videoFile = files.find(file =>
+            /\.(mp4|mkv|webm|mov)$/i.test(file)
+        )
+
+        if (!videoFile) {
+            throw new Error(
+                `yt-dlp انتهى بدون ملف فيديو. الملفات الموجودة: ${files.join(', ') || 'لا يوجد'}`
+            )
+        }
+
+        const filePath = path.join(tempDir, videoFile)
+
+        const stat = await fs.promises.stat(filePath)
+
+        if (!stat.size) {
+            throw new Error('ملف الفيديو فارغ.')
+        }
+
+        const title = String(result.stdout || 'Facebook Video')
+            .trim()
+            .split('\n')[0]
+            .trim() || 'Facebook Video'
+
+        return {
+            filePath,
+            tempDir,
+            title
+        }
+
+    } catch (error) {
+
+        await fs.promises.rm(tempDir, {
+            recursive: true,
+            force: true
+        }).catch(() => {})
+
+        throw error
+    }
+}
+
+// ===============================
+// 🎬 إرسال الفيديو
+// ===============================
+
+async function sendFacebookVideo(m, conn, filePath, title) {
+
+    const buffer = await fs.promises.readFile(filePath)
+
+    const ext = path.extname(filePath).toLowerCase()
+
+    const mimetype = {
+        '.mp4': 'video/mp4',
+        '.mkv': 'video/x-matroska',
+        '.webm': 'video/webm',
+        '.mov': 'video/quicktime'
+    }[ext] || 'video/mp4'
+
+    await conn.sendMessage(
+        m.chat,
+        {
+            video: buffer,
+            mimetype,
+            fileName: 'Facebook-Video.mp4',
+            caption:
+`╭━━━〔 𓆩⧼ ➳❥𝐑𝐎𝐂𝐊𝐘⃝💗 ⧽𓆪 〕━━━╮
+┃
+┃ ✅ تم تحميل فيديو فيسبوك
+┃
+┃ 🎬 ${String(title).substring(0, 70)}
+┃
+╰━━━━━━━━━━━━━━━━╯`
+        },
+        {
+            quoted: m
+        }
+    )
+
+    return true
+}
+
+// ===============================
+// 🤖 Handler
+// ===============================
+
+let handler = async (m, {
+    args,
+    conn,
+    usedPrefix,
+    command
+}) => {
+
+    const react = async emoji => {
+        try {
+            await conn.sendMessage(m.chat, {
+                react: {
+                    text: emoji,
+                    key: m.key
+                }
+            })
+        } catch {}
+    }
+
+    const url = args?.[0]
+
+    if (!url) {
+        await react('❌')
+
+        return conn.reply(
+            m.chat,
+`╭━━━〔 𓆩⧼𝐑𝐎𝐂𝐊𝐘 ⧽𓆪 〕━━━╮
+┃
+┃ 📥 تحميل فيسبوك
+┃
+┃ استخدم الأمر:
+┃ ${usedPrefix}${command} رابط_الفيديو
+┃
+╰━━━━━━━━━━━━━━━━╯`,
+            m
+        )
+    }
+
+    if (!/(facebook\.com|fb\.watch)/i.test(url)) {
+        await react('❌')
+
+        return conn.reply(
+            m.chat,
+            'الرابط ليس رابط Facebook صحيح.',
+            m
+        )
+    }
+
+    await react('📥')
+
+    let statusMsg
+    let downloaded
+
+    try {
+
+        statusMsg = await conn.reply(
+            m.chat,
+`╭━━━〔 ➳❥𝐑𝐎𝐂𝐊𝐘⃝💗 📘 〕━━━╮
+┃
+┃ ⏳ جاري تحميل فيديو Facebook...
+┃
+┃ 📡 جاري استخراج الفيديو
+┃
+╰━━━━━━━━━━━━━━━━╯`,
+            m
+        )
+
+        downloaded = await getFacebookVideo(url)
+
+        await sendFacebookVideo(
+            m,
+            conn,
+            downloaded.filePath,
+            downloaded.title
+        )
+
+        await react('✅')
+
+    } catch (error) {
+
+        console.error(
+            '[ROCKY FACEBOOK ERROR]',
+            error?.stderr || error?.message || error
+        )
+
+        await react('❌')
+
+        await conn.reply(
+            m.chat,
+`╭━━━〔 ➳❥𝐑𝐎𝐂𝐊𝐘⃝💗 ❌ 〕━━━╮
+┃
+┃ فشل تحميل Facebook
+┃
+┃ ✦ تأكد أن الفيديو متاح.
+┃
+┃ ⚠️ ${String(
+    error?.stderr ||
+    error?.message ||
+    'حدث خطأ غير معروف'
+).substring(0, 350)}
+┃
+╰━━━━━━━━━━━━━━━━╯`,
+            m
+        )
+
+    } finally {
+
+        if (statusMsg?.key) {
+            try {
+                await conn.sendMessage(m.chat, {
+                    delete: statusMsg.key
+                })
+            } catch {}
+        }
+
+        if (downloaded?.tempDir) {
+            await fs.promises.rm(downloaded.tempDir, {
+                recursive: true,
+                force: true
+            }).catch(() => {})
+        }
+    }
+}
+
+handler.help = [
+    'فيس <رابط>',
+    'فيسبوك <رابط>'
+]
+
+handler.tags = ['downloader']
+
+handler.command = /^(فيس|فيسبوك|fb|face|facebook)$/i
+
+export default handler
